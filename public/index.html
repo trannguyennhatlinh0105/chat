@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Chat (Gemini) + Webhook</title>
+    <style>
+      :root { font-family: system-ui, sans-serif; }
+      body { margin: 0; display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
+      header, footer { padding: 12px 16px; background: #f5f5f5; }
+      main { display: grid; grid-template-rows: 1fr auto; }
+      #log { padding: 16px; overflow: auto; }
+      form { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 12px; border-top: 1px solid #eee; }
+      textarea { resize: vertical; min-height: 60px; }
+      button { padding: 10px 16px; cursor: pointer; }
+      .msg { margin: 8px 0; padding: 10px 12px; border-radius: 10px; max-width: 80ch; white-space: pre-wrap; }
+      .user { background: #e3f2fd; }
+      .bot  { background: #e8f5e9; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <b>AI Chat (Gemini)</b> · Webhook ready at <code>/webhook</code>
+    </header>
+    <main>
+      <div id="log"></div>
+      <form id="chatForm">
+        <textarea id="message" placeholder="Nhập tin nhắn..." required></textarea>
+        <button type="submit">Gửi</button>
+      </form>
+    </main>
+    <footer>
+      Triển khai: Render/Vercel. API model: <code>GEMINI_MODEL</code> (mặc định gemini‑1.5‑flash)
+    </footer>
+
+    <script>
+      const log = document.getElementById('log');
+      const form = document.getElementById('chatForm');
+      const messageEl = document.getElementById('message');
+      const history = [];
+
+      function addMsg(role, text) {
+        const div = document.createElement('div');
+        div.className = `msg ${role === 'user' ? 'user' : 'bot'}`;
+        div.textContent = text;
+        log.appendChild(div);
+        log.scrollTop = log.scrollHeight;
+      }
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const message = messageEl.value.trim();
+        if (!message) return;
+        addMsg('user', message);
+        messageEl.value = '';
+
+        try {
+          const res = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, history })
+          });
+          const data = await res.json();
+          if (!data.ok) throw new Error(data.error || 'Lỗi không xác định');
+          const answer = data.answer || '';
+          addMsg('bot', answer);
+          history.push({ role: 'user', parts: [{ text: message }] });
+          history.push({ role: 'model', parts: [{ text: answer }] });
+        } catch (err) {
+          addMsg('bot', '❌ ' + err.message);
+        }
+      });
+    </script>
+  </body>
+</html>
