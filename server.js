@@ -34,6 +34,9 @@ const processedContent = new Map(); // content_hash -> timestamp
 // Active request tracking để block same request body
 const activeRequests = new Set();
 
+// Conversation memory để bot nhớ context
+const conversationMemory = new Map(); // conversationId -> { history: [...], lastActive: timestamp }
+
 // Chuẩn hoá __dirname trong ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -209,7 +212,9 @@ app.get("/api/debug", (_, res) => {
     processedContent_size: processedContent.size,
     recentConversations_size: recentConversations.size,
     activeRequests_list: Array.from(activeRequests).slice(0, 5), // Only first 5
-    processedContent_recent: Array.from(processedContent.keys()).slice(-5) // Last 5
+    processedContent_recent: Array.from(processedContent.keys()).slice(-5), // Last 5
+    conversationMemory_size: conversationMemory.size,
+    conversationMemory_active: Array.from(conversationMemory.keys()).slice(-5) // Last 5 conversations
   });
 });
 
@@ -401,14 +406,53 @@ app.post("/webhook", async (req, res) => {
         }
         console.log(`[Webhook-${requestId}] Processing HUMAN customer message: "${content}"`);
         
+        // ===== CONVERSATION MEMORY =====
+        // Get or create conversation context
+        let conversation = conversationMemory.get(conversationId);
+        if (!conversation) {
+          conversation = {
+            history: [],
+            lastActive: now,
+            leadData: {} // Track collected lead information
+          };
+          conversationMemory.set(conversationId, conversation);
+          console.log(`[Memory] Created new conversation context for ${conversationId}`);
+        } else {
+          conversation.lastActive = now;
+          console.log(`[Memory] Retrieved conversation context for ${conversationId}, history length: ${conversation.history.length}`);
+        }
+        
+        // Add current user message to history
+        conversation.history.push({
+          role: "user",
+          parts: [{ text: content }]
+        });
+        
         // Update conversation tracking
-        const now = Date.now();
         recentConversations.set(conversationId, now);
         
         try {
-          console.log("[AI] Calling Gemini...");
-          const aiResponse = await geminiCall({ prompt: content, history: [] });
+          console.log("[AI] Calling Gemini with conversation history...");
+          console.log(`[AI] History length: ${conversation.history.length}`);
+          
+          const aiResponse = await geminiCall({ 
+            prompt: content, 
+            history: conversation.history.slice(0, -1) // Exclude current message as it's passed as prompt
+          });
+          
           console.log(`[AI] Response: "${aiResponse}"`);
+          
+          // Add AI response to history
+          conversation.history.push({
+            role: "model", 
+            parts: [{ text: aiResponse }]
+          });
+          
+          // Keep history manageable (last 20 exchanges = 40 messages)
+          if (conversation.history.length > 40) {
+            conversation.history = conversation.history.slice(-40);
+            console.log(`[Memory] Trimmed history to last 40 messages for conversation ${conversationId}`);
+          }
           
           console.log("[Chatwoot] Sending response back...");
           const chatwootResult = await sendChatwootMessage(conversationId, accountId, aiResponse);
@@ -425,11 +469,24 @@ app.post("/webhook", async (req, res) => {
             }
           }
           
+          // Clean up old conversations (older than 2 hours)
+          if (conversationMemory.size > 50) {
+            console.log(`[Cleanup] Conversation memory size: ${conversationMemory.size}, cleaning old ones...`);
+            const memoryCleanupTime = now - (2 * 60 * 60 * 1000); // 2 hours
+            for (const [convId, conv] of conversationMemory.entries()) {
+              if (conv.lastActive < memoryCleanupTime) {
+                conversationMemory.delete(convId);
+                console.log(`[Cleanup] Removed old conversation: ${convId}`);
+              }
+            }
+          }
+          
           return res.json({ 
             ok: true, 
             received: true, 
             processed: true,
             unique_key: uniqueKey,
+            conversation_history_length: conversation.history.length,
             ai_response: aiResponse,
             chatwoot_sent: chatwootResult.sent,
             chatwoot_error: chatwootResult.error || null
