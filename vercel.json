@@ -9,6 +9,7 @@
     { "src": "^/api/config$", "dest": "/server.js" },
     { "src": "^/api/debug$", "dest": "/server.js" },
     { "src": "^/webhook$",  "dest": "/server.js" },
+    { "src": "^/webhook-test$",  "dest": "/server.js" },
     { "src": "^/health$",   "dest": "/server.js" },
     { "src": "^/(.*\\.(css|js|png|jpg|jpeg|gif|ico|svg))$", "dest": "/public/$1" },
     { "src": "^/(.*)",       "dest": "/public/index.html" }

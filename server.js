@@ -72,12 +72,20 @@ const leadSchema = {
 
 // ---- Helpers ----
 function signOk(req){
-  if (!WEBHOOK_SECRET) return true;
+  if (!WEBHOOK_SECRET) {
+    console.log("[Signature] No WEBHOOK_SECRET, allowing all requests");
+    return true;
+  }
   const sig = req.header("x-webhook-signature");
-  if (!sig) return false;
+  if (!sig) {
+    console.log("[Signature] No signature header found, rejecting");
+    return false;
+  }
   const payload = JSON.stringify(req.body || {});
   const expected = crypto.createHmac("sha256", WEBHOOK_SECRET).update(payload).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+  const isValid = crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+  console.log("[Signature] Validation result:", isValid);
+  return isValid;
 }
 
 async function geminiCall({ prompt, history = [], jsonMode = false, schema = null }){
@@ -277,6 +285,54 @@ app.post("/webhook", async (req, res) => {
   } catch (e) {
     console.error(e);
     return res.status(500).json({ ok:false, error: String(e?.message||e) });
+  }
+});
+
+// Webhook bypass cho debug (không cần signature)
+app.post("/webhook-test", async (req, res) => {
+  try {
+    console.log("[Webhook-Test] === BYPASS WEBHOOK ===");
+    console.log("[Webhook-Test] Body:", JSON.stringify(req.body, null, 2));
+    
+    const webhookData = req.body;
+    
+    // Xử lý trực tiếp không cần check signature
+    if (webhookData.event && webhookData.data) {
+      console.log("[Webhook-Test] Event:", webhookData.event);
+      
+      if (webhookData.event === 'message_created' && 
+          webhookData.data.message_type === 'incoming') {
+        
+        const message = webhookData.data.content;
+        const conversationId = webhookData.data.conversation?.id;
+        const accountId = webhookData.data.account?.id;
+        
+        console.log("[Webhook-Test] Processing:", message, conversationId, accountId);
+        
+        if (message && conversationId && accountId) {
+          try {
+            const aiResponse = await geminiCall({ prompt: message, history: [] });
+            const chatwootResult = await sendChatwootMessage(conversationId, accountId, aiResponse);
+            
+            return res.json({ 
+              ok: true, 
+              processed: true,
+              ai_response: aiResponse,
+              chatwoot_sent: chatwootResult.sent,
+              chatwoot_error: chatwootResult.error || null
+            });
+          } catch (error) {
+            console.error("[Webhook-Test] Error:", error);
+            return res.json({ ok: false, error: String(error) });
+          }
+        }
+      }
+    }
+    
+    return res.json({ ok: true, received: true, processed: false });
+  } catch (e) {
+    console.error("[Webhook-Test] Error:", e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
