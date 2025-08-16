@@ -20,9 +20,9 @@
   </head>
   <body>
     <header>
-      <b>Trợ lý Binhnn Digital</b> · Hỗ trợ nhanh & thu thập yêu cầu khi bạn bận · <a href="#" id="book">Đặt lịch</a>
-    </header>
-    <script>
+  <b>Trợ lý Binhnn Digital</b> · Hỗ trợ nhanh & thu thập yêu cầu khi bạn bận · <a href="#" id="book">Đặt lịch</a>
+</header>
+<script>
   // nếu có booking_url trong cấu hình server sẽ trả về, gắn vào đây sau khi load
   fetch('/api/config').then(r=>r.json()).then(cfg=>{
     const a=document.getElementById('book');
@@ -41,42 +41,59 @@
     </footer>
 
     <script>
-      const log = document.getElementById('log');
-      const form = document.getElementById('chatForm');
-      const messageEl = document.getElementById('message');
-      const history = [];
+  const log = document.getElementById('log');
+  const form = document.getElementById('chatForm');
+  const messageEl = document.getElementById('message');
+  const history = [];
 
-      function addMsg(role, text) {
-        const div = document.createElement('div');
-        div.className = `msg ${role === 'user' ? 'user' : 'bot'}`;
-        div.textContent = text;
-        log.appendChild(div);
-        log.scrollTop = log.scrollHeight;
+  function addMsg(role, text) {
+    const div = document.createElement('div');
+    div.className = `msg ${role === 'user' ? 'user' : role === 'bot' ? 'bot' : 'sys'}`;
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  async function parseJsonSafely(res){
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    if (ct.includes('application/json')) {
+      return await res.json();
+    } else {
+      const text = await res.text();
+      throw new Error(`Non-JSON response (HTTP ${res.status}): ${text.slice(0,300)}`);
+    }
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const message = messageEl.value.trim();
+    if (!message) return;
+    addMsg('user', message);
+    messageEl.value = '';
+
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, history })
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(()=> '');
+        throw new Error(`HTTP ${res.status}: ${text.slice(0,300)}`);
       }
 
-      form.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const message = messageEl.value.trim();
-        if (!message) return;
-        addMsg('user', message);
-        messageEl.value = '';
+      const data = await parseJsonSafely(res);
+      if (!data.ok) throw new Error(data.error || 'Lỗi không xác định');
 
-        try {
-          const res = await fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message, history })
-          });
-          const data = await res.json();
-          if (!data.ok) throw new Error(data.error || 'Lỗi không xác định');
-          const answer = data.answer || '';
-          addMsg('bot', answer);
-          history.push({ role: 'user', parts: [{ text: message }] });
-          history.push({ role: 'model', parts: [{ text: answer }] });
-        } catch (err) {
-          addMsg('bot', '❌ ' + err.message);
-        }
-      });
-    </script>
+      const answer = data.answer || '';
+      addMsg('bot', answer);
+      history.push({ role: 'user', parts: [{ text: message }] });
+      history.push({ role: 'model', parts: [{ text: answer }] });
+    } catch (err) {
+      addMsg('sys', '❌ ' + (err?.message || err));
+    }
+  });
+</script>
   </body>
 </html>
