@@ -17,6 +17,8 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // bắt buộc cho /api/chat
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || ""; // tuỳ chọn
 const MODEL = process.env.GEMINI_MODEL || "models/gemini-1.5-flash";
 const LEADS_WEBHOOK_URL = process.env.LEADS_WEBHOOK_URL || ""; // Apps Script/Zapier
+const CHATWOOT_API_KEY = process.env.CHATWOOT_API_KEY || ""; // API key cho Chatwoot
+const CHATWOOT_BASE_URL = process.env.CHATWOOT_BASE_URL || ""; // Base URL của Chatwoot instance
 const PORT = process.env.PORT || 3000;
 
 // Chuẩn hoá __dirname trong ESM
@@ -126,6 +128,36 @@ async function forwardLead(lead){
   }
 }
 
+async function sendChatwootMessage(conversationId, accountId, message) {
+  if (!CHATWOOT_API_KEY || !CHATWOOT_BASE_URL) {
+    return { sent: false, error: "Missing CHATWOOT_API_KEY or CHATWOOT_BASE_URL" };
+  }
+  
+  try {
+    const url = `${CHATWOOT_BASE_URL}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api_access_token": CHATWOOT_API_KEY
+      },
+      body: JSON.stringify({
+        content: `🤖 ${message}`,
+        message_type: "outgoing"
+      })
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Chatwoot API error: ${response.status} - ${errorText}`);
+    }
+    
+    return { sent: true, status: response.status };
+  } catch (e) {
+    return { sent: false, error: String(e) };
+  }
+}
+
 // ---- API ----
 app.get("/api/config", (_, res) => res.json({ brand: business.brand, booking_url: business.booking_url }));
 
@@ -153,11 +185,62 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// POST webhook thực tế
-app.post("/webhook", (req, res) => {
+// POST webhook thực tế - Tích hợp Chatwoot
+app.post("/webhook", async (req, res) => {
   try {
     if (!signOk(req)) return res.status(401).json({ ok:false, error: "Invalid signature" });
-    console.log("[Webhook]", new Date().toISOString(), JSON.stringify(req.body));
+    
+    const webhookData = req.body;
+    console.log("[Webhook]", new Date().toISOString(), JSON.stringify(webhookData));
+    
+    // Kiểm tra xem có phải Chatwoot webhook không
+    if (webhookData.event && webhookData.data) {
+      // Chỉ xử lý tin nhắn đến từ người dùng (không phải bot)
+      if (webhookData.event === 'message_created' && 
+          webhookData.data.message_type === 'incoming' &&
+          !webhookData.data.content?.includes('[Bot]')) {
+        
+        const message = webhookData.data.content;
+        const conversationId = webhookData.data.conversation?.id;
+        const accountId = webhookData.data.account?.id;
+        
+        if (message && conversationId && accountId) {
+          console.log(`[Chatwoot] Processing message: "${message}" from conversation ${conversationId}`);
+          
+          try {
+            // Gọi AI để lấy phản hồi
+            const aiResponse = await geminiCall({ 
+              prompt: message, 
+              history: [] // Có thể mở rộng để lưu lịch sử hội thoại
+            });
+            
+            // Gửi phản hồi lại Chatwoot qua API
+            const chatwootResult = await sendChatwootMessage(conversationId, accountId, aiResponse);
+            console.log(`[AI Response] ${aiResponse}`);
+            console.log(`[Chatwoot Send]`, chatwootResult);
+            
+            return res.json({ 
+              ok: true, 
+              received: true, 
+              processed: true,
+              ai_response: aiResponse,
+              chatwoot_sent: chatwootResult.sent,
+              chatwoot_error: chatwootResult.error || null
+            });
+          } catch (aiError) {
+            console.error('[AI Error]', aiError);
+            return res.json({ 
+              ok: true, 
+              received: true, 
+              processed: false,
+              error: "AI processing failed"
+            });
+          }
+        }
+      }
+    }
+    
+    // Webhook khác hoặc không phải message
     return res.json({ ok:true, received:true });
   } catch (e) {
     console.error(e);
