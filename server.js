@@ -161,6 +161,19 @@ async function sendChatwootMessage(conversationId, accountId, message) {
 // ---- API ----
 app.get("/api/config", (_, res) => res.json({ brand: business.brand, booking_url: business.booking_url }));
 
+// Debug endpoint để kiểm tra environment variables
+app.get("/api/debug", (_, res) => {
+  res.json({
+    hasGeminiKey: !!GEMINI_API_KEY,
+    hasWebhookSecret: !!WEBHOOK_SECRET,
+    hasChatwootKey: !!CHATWOOT_API_KEY,
+    hasChatwootUrl: !!CHATWOOT_BASE_URL,
+    chatwootUrl: CHATWOOT_BASE_URL || "NOT_SET",
+    geminiModel: MODEL,
+    nodeEnv: process.env.NODE_ENV || "not_set"
+  });
+});
+
 app.post("/api/chat", async (req, res) => {
   try {
     const { message, history } = req.body || {};
