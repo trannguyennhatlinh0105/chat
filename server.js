@@ -202,8 +202,50 @@ app.get("/api/debug", (_, res) => {
     hasChatwootUrl: !!CHATWOOT_BASE_URL,
     chatwootUrl: CHATWOOT_BASE_URL || "NOT_SET",
     geminiModel: MODEL,
-    nodeEnv: process.env.NODE_ENV || "not_set"
+    nodeEnv: process.env.NODE_ENV || "not_set",
+    // Debug duplicate prevention status
+    activeRequests_size: activeRequests.size,
+    processedMessages_size: processedMessages.size,
+    processedContent_size: processedContent.size,
+    recentConversations_size: recentConversations.size,
+    activeRequests_list: Array.from(activeRequests).slice(0, 5), // Only first 5
+    processedContent_recent: Array.from(processedContent.keys()).slice(-5) // Last 5
   });
+});
+
+// Debug test double reply simulation
+app.get("/api/test-double", async (req, res) => {
+  const testMessage = req.query.message || "Test message " + Date.now();
+  
+  console.log(`[DEBUG] Simulating double message: "${testMessage}"`);
+  
+  try {
+    // Simulate processing same message twice
+    const contentHash = testMessage.trim().toLowerCase().replace(/\s+/g, ' ');
+    const now = Date.now();
+    
+    // First attempt
+    const lastContentTime1 = processedContent.get(contentHash);
+    const blocked1 = lastContentTime1 && (now - lastContentTime1) < 60000;
+    if (!blocked1) {
+      processedContent.set(contentHash, now);
+    }
+    
+    // Second attempt (immediately after)
+    const lastContentTime2 = processedContent.get(contentHash);
+    const blocked2 = lastContentTime2 && (now - lastContentTime2) < 60000;
+    
+    return res.json({
+      message: testMessage,
+      contentHash,
+      attempt1: { blocked: blocked1, timestamp: lastContentTime1 },
+      attempt2: { blocked: blocked2, timestamp: lastContentTime2 },
+      should_block_second: blocked2,
+      processedContent_size: processedContent.size
+    });
+  } catch (error) {
+    return res.json({ error: String(error) });
+  }
 });
 
 app.post("/api/chat", async (req, res) => {
@@ -312,46 +354,33 @@ app.post("/webhook", async (req, res) => {
       const isMessageEvent = webhookData.event === 'message_created';
       const isIncomingMessage = messageType === 'incoming' || messageType === 0; // 0 = incoming trong một số versions
       
+      // Log ALL events for debugging 
+      console.log(`[Webhook-${requestId}] Event Analysis:`);
+      console.log("- Event type:", webhookData.event);
+      console.log("- Message type:", messageType);
+      console.log("- Is message event:", isMessageEvent);
+      console.log("- Is incoming:", isIncomingMessage);
+      console.log("- Content:", content);
+      
+      // ONLY process message_created + incoming messages
       if (isMessageEvent && content && conversationId && accountId && isIncomingMessage) {
-        // 1. Tạo content hash để detect same content
-        const contentHash = content.trim().toLowerCase().replace(/\s+/g, ' '); // normalize spaces
-        const now = Date.now();
         
-        console.log(`[Webhook-${requestId}] Content hash: "${contentHash}"`);
+        // ===== SINGLE SUPER-STRONG PROTECTION =====
+        // Tạo unique ID dựa trên conversation + content + timestamp(giây)
+        const timestamp = Math.floor(Date.now() / 1000); // Round to seconds
+        const uniqueKey = `${conversationId}:${content.trim()}:${timestamp}`;
         
-        // 2. Check if SAME CONTENT processed in last 60 seconds (SUPER STRICT)
-        const lastContentTime = processedContent.get(contentHash);
-        if (lastContentTime && (now - lastContentTime) < 60000) { // 60 seconds
-          console.log(`[Webhook-${requestId}] 🚫 DUPLICATE CONTENT BLOCKED - Same content "${contentHash}" processed ${now - lastContentTime}ms ago`);
-          return res.json({ ok: true, received: true, skipped: "duplicate_content_blocked" });
+        console.log(`[Webhook-${requestId}] Unique key: ${uniqueKey}`);
+        
+        // Check if we already processed this EXACT key
+        if (processedMessages.has(uniqueKey)) {
+          console.log(`[Webhook-${requestId}] 🚫 EXACT DUPLICATE BLOCKED: ${uniqueKey}`);
+          return res.json({ ok: true, received: true, skipped: "exact_duplicate" });
         }
         
-        // 3. Mark content as processed IMMEDIATELY
-        processedContent.set(contentHash, now);
-        
-        // 4. Tạo message signature để detect duplicates
-        const messageSignature = `${conversationId}-${content.trim().substring(0, 50)}-${Date.now().toString().substring(0, -3)}`; // Tròn về giây
-        
-        console.log(`[Webhook-${requestId}] Message signature:`, messageSignature);
-        
-        // 5. Check duplicate message trong 30 giây
-        if (processedMessages.has(messageSignature)) {
-          console.log(`[Webhook-${requestId}] DUPLICATE MESSAGE DETECTED - Already processed: ${messageSignature}`);
-          return res.json({ ok: true, received: true, skipped: "duplicate_message" });
-        }
-        
-        // 6. Mark message as processed immediately
-        processedMessages.add(messageSignature);
-        
-        // 7. Rate limiting check per conversation
-        const lastProcessed = recentConversations.get(conversationId);
-        
-        if (lastProcessed && (now - lastProcessed) < RATE_LIMIT_WINDOW) {
-          console.log(`[Webhook-${requestId}] RATE LIMITED - conversation ${conversationId} processed ${now - lastProcessed}ms ago (< ${RATE_LIMIT_WINDOW}ms)`);
-          processedMessages.delete(messageSignature); // Remove vì không xử lý
-          processedContent.delete(contentHash); // Remove content hash cũng
-          return res.json({ ok: true, received: true, skipped: "rate_limited" });
-        }
+        // Mark as processed IMMEDIATELY before any async operations
+        processedMessages.add(uniqueKey);
+        console.log(`[Webhook-${requestId}] ✅ MARKED AS PROCESSED: ${uniqueKey}`);
         
         // Enhanced bot message detection to avoid loops
         const isBotMessage = 
@@ -367,14 +396,13 @@ app.post("/webhook", async (req, res) => {
           console.log("- Content contains bot marker:", content.includes('🤖') || content.includes('[Bot]'));
           console.log("- Sender type:", sender?.type);
           console.log("- Message type:", messageType);
-          processedMessages.delete(messageSignature); // Remove vì không xử lý
-          processedContent.delete(contentHash); // Remove content hash cũng
+          processedMessages.delete(uniqueKey); // Remove vì không xử lý
           return res.json({ ok: true, received: true, skipped: "bot_message_detected" });
         }
-        
         console.log(`[Webhook-${requestId}] Processing HUMAN customer message: "${content}"`);
         
-        // Update rate limit tracking
+        // Update conversation tracking
+        const now = Date.now();
         recentConversations.set(conversationId, now);
         
         try {
@@ -385,28 +413,14 @@ app.post("/webhook", async (req, res) => {
           console.log("[Chatwoot] Sending response back...");
           const chatwootResult = await sendChatwootMessage(conversationId, accountId, aiResponse);
           
-          // Clean up old entries (optional)
-          if (recentConversations.size > 100) {
-            const cutoff = now - (RATE_LIMIT_WINDOW * 2);
-            for (const [convId, timestamp] of recentConversations.entries()) {
-              if (timestamp < cutoff) {
-                recentConversations.delete(convId);
-              }
-            }
-          }
-          
-          // Clean up old processed messages (older than 30 seconds)
-          if (processedMessages.size > 200) {
-            console.log(`[Cleanup] Processed messages set size: ${processedMessages.size}, clearing...`);
-            processedMessages.clear();
-          }
-          
-          // Clean up old content hashes (older than 60 seconds) 
-          if (processedContent.size > 100) {
-            const contentCutoff = now - 60000; // 60 seconds
-            for (const [hash, timestamp] of processedContent.entries()) {
-              if (timestamp < contentCutoff) {
-                processedContent.delete(hash);
+          // Clean up old entries (every 100 items)
+          if (processedMessages.size > 100) {
+            console.log(`[Cleanup] Processed messages size: ${processedMessages.size}, clearing old ones...`);
+            const cutoffTime = timestamp - 300; // Keep only last 5 minutes
+            for (const key of processedMessages) {
+              const keyTimestamp = parseInt(key.split(':')[2]);
+              if (keyTimestamp < cutoffTime) {
+                processedMessages.delete(key);
               }
             }
           }
@@ -415,14 +429,14 @@ app.post("/webhook", async (req, res) => {
             ok: true, 
             received: true, 
             processed: true,
+            unique_key: uniqueKey,
             ai_response: aiResponse,
             chatwoot_sent: chatwootResult.sent,
             chatwoot_error: chatwootResult.error || null
           });
         } catch (error) {
           console.error(`[Webhook-${requestId}] Processing Error:`, error);
-          processedMessages.delete(messageSignature); // Remove vì failed
-          processedContent.delete(contentHash); // Remove content hash cũng  
+          processedMessages.delete(uniqueKey); // Remove vì failed
           return res.json({ 
             ok: true, 
             received: true, 
