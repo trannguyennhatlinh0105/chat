@@ -201,13 +201,23 @@ app.post("/api/chat", async (req, res) => {
 // POST webhook thực tế - Tích hợp Chatwoot
 app.post("/webhook", async (req, res) => {
   try {
-    if (!signOk(req)) return res.status(401).json({ ok:false, error: "Invalid signature" });
+    console.log("[Webhook] === NEW WEBHOOK REQUEST ===");
+    console.log("[Webhook] Timestamp:", new Date().toISOString());
+    console.log("[Webhook] Headers:", JSON.stringify(req.headers, null, 2));
+    console.log("[Webhook] Body:", JSON.stringify(req.body, null, 2));
+    
+    if (!signOk(req)) {
+      console.log("[Webhook] Signature check failed");
+      return res.status(401).json({ ok:false, error: "Invalid signature" });
+    }
     
     const webhookData = req.body;
-    console.log("[Webhook]", new Date().toISOString(), JSON.stringify(webhookData));
     
     // Kiểm tra xem có phải Chatwoot webhook không
     if (webhookData.event && webhookData.data) {
+      console.log("[Webhook] Event type:", webhookData.event);
+      console.log("[Webhook] Message type:", webhookData.data.message_type);
+      console.log("[Webhook] Content:", webhookData.data.content);
       // Chỉ xử lý tin nhắn đến từ người dùng (không phải bot)
       if (webhookData.event === 'message_created' && 
           webhookData.data.message_type === 'incoming' &&
@@ -218,19 +228,21 @@ app.post("/webhook", async (req, res) => {
         const accountId = webhookData.data.account?.id;
         
         if (message && conversationId && accountId) {
-          console.log(`[Chatwoot] Processing message: "${message}" from conversation ${conversationId}`);
+          console.log(`[Chatwoot] Processing message: "${message}" from conversation ${conversationId}, account ${accountId}`);
           
           try {
+            console.log("[AI] Calling Gemini API...");
             // Gọi AI để lấy phản hồi
             const aiResponse = await geminiCall({ 
               prompt: message, 
               history: [] // Có thể mở rộng để lưu lịch sử hội thoại
             });
+            console.log(`[AI] Response received: "${aiResponse}"`);
             
             // Gửi phản hồi lại Chatwoot qua API
+            console.log("[Chatwoot] Sending message back to Chatwoot...");
             const chatwootResult = await sendChatwootMessage(conversationId, accountId, aiResponse);
-            console.log(`[AI Response] ${aiResponse}`);
-            console.log(`[Chatwoot Send]`, chatwootResult);
+            console.log(`[Chatwoot] Send result:`, chatwootResult);
             
             return res.json({ 
               ok: true, 
@@ -249,11 +261,18 @@ app.post("/webhook", async (req, res) => {
               error: "AI processing failed"
             });
           }
+        } else {
+          console.log("[Chatwoot] Missing required fields - message:", !!message, "conversationId:", !!conversationId, "accountId:", !!accountId);
         }
+      } else {
+        console.log("[Webhook] Not processing - event:", webhookData.event, "message_type:", webhookData.data?.message_type, "hasBot:", webhookData.data?.content?.includes('[Bot]'));
       }
+    } else {
+      console.log("[Webhook] Not a Chatwoot webhook - missing event or data");
     }
     
     // Webhook khác hoặc không phải message
+    console.log("[Webhook] Returning basic OK response");
     return res.json({ ok:true, received:true });
   } catch (e) {
     console.error(e);
