@@ -28,6 +28,12 @@ const RATE_LIMIT_WINDOW = 5000; // 5 seconds
 // Duplicate message detection (30 giây)
 const processedMessages = new Set();
 
+// Content-based deduplication (1 phút)
+const processedContent = new Map(); // content_hash -> timestamp
+
+// Active request tracking để block same request body
+const activeRequests = new Set();
+
 // Chuẩn hoá __dirname trong ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -233,6 +239,24 @@ app.post("/webhook", async (req, res) => {
     console.log(`[Webhook-${requestId}] Headers:`, JSON.stringify(req.headers, null, 2));
     console.log(`[Webhook-${requestId}] Body:`, JSON.stringify(req.body, null, 2));
     
+    // ULTIMATE DUPLICATE PROTECTION - Check if we already have processing request for same body
+    const bodyHash = JSON.stringify(req.body);
+    const bodyHashShort = bodyHash.substring(0, 100);
+    console.log(`[Webhook-${requestId}] Body hash (first 100 chars): ${bodyHashShort}`);
+    
+    if (activeRequests.has(bodyHashShort)) {
+      console.log(`[Webhook-${requestId}] 🚫 DUPLICATE REQUEST BLOCKED - Same body already processing`);
+      return res.json({ ok: true, received: true, skipped: "duplicate_request_body" });
+    }
+    
+    // Mark request as active
+    activeRequests.add(bodyHashShort);
+    
+    // Auto-cleanup after 10 seconds
+    setTimeout(() => {
+      activeRequests.delete(bodyHashShort);
+    }, 10000);
+    
     // Disable signature validation để debug
     // if (!signOk(req)) {
     //   console.log("[Webhook] Signature check failed");
@@ -289,27 +313,43 @@ app.post("/webhook", async (req, res) => {
       const isIncomingMessage = messageType === 'incoming' || messageType === 0; // 0 = incoming trong một số versions
       
       if (isMessageEvent && content && conversationId && accountId && isIncomingMessage) {
-        // Tạo message signature để detect duplicates
+        // 1. Tạo content hash để detect same content
+        const contentHash = content.trim().toLowerCase().replace(/\s+/g, ' '); // normalize spaces
+        const now = Date.now();
+        
+        console.log(`[Webhook-${requestId}] Content hash: "${contentHash}"`);
+        
+        // 2. Check if SAME CONTENT processed in last 60 seconds (SUPER STRICT)
+        const lastContentTime = processedContent.get(contentHash);
+        if (lastContentTime && (now - lastContentTime) < 60000) { // 60 seconds
+          console.log(`[Webhook-${requestId}] 🚫 DUPLICATE CONTENT BLOCKED - Same content "${contentHash}" processed ${now - lastContentTime}ms ago`);
+          return res.json({ ok: true, received: true, skipped: "duplicate_content_blocked" });
+        }
+        
+        // 3. Mark content as processed IMMEDIATELY
+        processedContent.set(contentHash, now);
+        
+        // 4. Tạo message signature để detect duplicates
         const messageSignature = `${conversationId}-${content.trim().substring(0, 50)}-${Date.now().toString().substring(0, -3)}`; // Tròn về giây
         
         console.log(`[Webhook-${requestId}] Message signature:`, messageSignature);
         
-        // Check duplicate message trong 30 giây
+        // 5. Check duplicate message trong 30 giây
         if (processedMessages.has(messageSignature)) {
           console.log(`[Webhook-${requestId}] DUPLICATE MESSAGE DETECTED - Already processed: ${messageSignature}`);
           return res.json({ ok: true, received: true, skipped: "duplicate_message" });
         }
         
-        // Mark message as processed immediately
+        // 6. Mark message as processed immediately
         processedMessages.add(messageSignature);
         
-        // Rate limiting check per conversation
-        const now = Date.now();
+        // 7. Rate limiting check per conversation
         const lastProcessed = recentConversations.get(conversationId);
         
         if (lastProcessed && (now - lastProcessed) < RATE_LIMIT_WINDOW) {
           console.log(`[Webhook-${requestId}] RATE LIMITED - conversation ${conversationId} processed ${now - lastProcessed}ms ago (< ${RATE_LIMIT_WINDOW}ms)`);
           processedMessages.delete(messageSignature); // Remove vì không xử lý
+          processedContent.delete(contentHash); // Remove content hash cũng
           return res.json({ ok: true, received: true, skipped: "rate_limited" });
         }
         
@@ -328,6 +368,7 @@ app.post("/webhook", async (req, res) => {
           console.log("- Sender type:", sender?.type);
           console.log("- Message type:", messageType);
           processedMessages.delete(messageSignature); // Remove vì không xử lý
+          processedContent.delete(contentHash); // Remove content hash cũng
           return res.json({ ok: true, received: true, skipped: "bot_message_detected" });
         }
         
@@ -360,6 +401,16 @@ app.post("/webhook", async (req, res) => {
             processedMessages.clear();
           }
           
+          // Clean up old content hashes (older than 60 seconds) 
+          if (processedContent.size > 100) {
+            const contentCutoff = now - 60000; // 60 seconds
+            for (const [hash, timestamp] of processedContent.entries()) {
+              if (timestamp < contentCutoff) {
+                processedContent.delete(hash);
+              }
+            }
+          }
+          
           return res.json({ 
             ok: true, 
             received: true, 
@@ -371,6 +422,7 @@ app.post("/webhook", async (req, res) => {
         } catch (error) {
           console.error(`[Webhook-${requestId}] Processing Error:`, error);
           processedMessages.delete(messageSignature); // Remove vì failed
+          processedContent.delete(contentHash); // Remove content hash cũng  
           return res.json({ 
             ok: true, 
             received: true, 
@@ -392,9 +444,18 @@ app.post("/webhook", async (req, res) => {
     
     // Webhook khác hoặc không phải message
     console.log(`[Webhook-${requestId}] Returning basic OK response`);
+    
+    // Cleanup request tracking 
+    activeRequests.delete(bodyHashShort);
+    
     return res.json({ ok:true, received:true });
   } catch (e) {
     console.error(`[Webhook] Error:`, e);
+    
+    // Cleanup on error
+    if (typeof bodyHashShort !== 'undefined') {
+      activeRequests.delete(bodyHashShort);
+    }
     return res.status(500).json({ ok:false, error: String(e?.message||e) });
   }
 });
