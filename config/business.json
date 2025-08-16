@@ -1,0 +1,14 @@
+{
+  "brand": "Binhnn Digital",
+  "tagline": "Thiết kế web | SEO tổng thể | Chạy quảng cáo | Giải pháp digital trọn gói",
+  "timezone": "Asia/Ho_Chi_Minh",
+  "contact": { "email": "contact@binhnn.dev", "phone": "0877 14 3979", "site": "https://binhnn.dev" },
+  "services": [
+    "Thiết kế web",
+    "SEO tổng thể",
+    "Chạy quảng cáo",
+    "Giải pháp digital trọn gói"
+  ],
+  "lead_required": ["full_name","email","phone","service_interest","website","budget","timeline","goals"],
+  "booking_url": "https://binhnn.dev/#contact"  
+}

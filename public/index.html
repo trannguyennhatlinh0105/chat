@@ -20,8 +20,15 @@
   </head>
   <body>
     <header>
-      <b>AI Chat (Gemini)</b> · Webhook ready at <code>/webhook</code>
+      <b>Trợ lý Binhnn Digital</b> · Hỗ trợ nhanh & thu thập yêu cầu khi bạn bận · <a href="#" id="book">Đặt lịch</a>
     </header>
+    <script>
+  // nếu có booking_url trong cấu hình server sẽ trả về, gắn vào đây sau khi load
+  fetch('/api/config').then(r=>r.json()).then(cfg=>{
+    const a=document.getElementById('book');
+    if (cfg.booking_url) a.href = cfg.booking_url;
+  });
+</script>
     <main>
       <div id="log"></div>
       <form id="chatForm">
