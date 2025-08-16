@@ -25,6 +25,9 @@ const PORT = process.env.PORT || 3000;
 const recentConversations = new Map(); // conversation_id -> last_processed_time
 const RATE_LIMIT_WINDOW = 5000; // 5 seconds
 
+// Duplicate message detection (30 giây)
+const processedMessages = new Set();
+
 // Chuẩn hoá __dirname trong ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -224,10 +227,11 @@ app.post("/api/chat", async (req, res) => {
 // POST webhook thực tế - Tích hợp Chatwoot
 app.post("/webhook", async (req, res) => {
   try {
-    console.log("[Webhook] === NEW WEBHOOK REQUEST ===");
-    console.log("[Webhook] Timestamp:", new Date().toISOString());
-    console.log("[Webhook] Headers:", JSON.stringify(req.headers, null, 2));
-    console.log("[Webhook] Body:", JSON.stringify(req.body, null, 2));
+    const requestId = Math.random().toString(36).substr(2, 9);
+    console.log(`[Webhook-${requestId}] === NEW WEBHOOK REQUEST ===`);
+    console.log(`[Webhook-${requestId}] Timestamp:`, new Date().toISOString());
+    console.log(`[Webhook-${requestId}] Headers:`, JSON.stringify(req.headers, null, 2));
+    console.log(`[Webhook-${requestId}] Body:`, JSON.stringify(req.body, null, 2));
     
     // Disable signature validation để debug
     // if (!signOk(req)) {
@@ -239,8 +243,8 @@ app.post("/webhook", async (req, res) => {
     
     // Kiểm tra xem có phải Chatwoot webhook không
     if (webhookData.event) {
-      console.log("[Webhook] Event type:", webhookData.event);
-      console.log("[Webhook] Full payload structure:", Object.keys(webhookData));
+      console.log(`[Webhook-${requestId}] Event type:`, webhookData.event);
+      console.log(`[Webhook-${requestId}] Full payload structure:`, Object.keys(webhookData));
       
       // Handle cả webhook thông thường và Agent Bot format
       let messageData, content, messageType, conversationId, accountId;
@@ -261,7 +265,7 @@ app.post("/webhook", async (req, res) => {
         accountId = webhookData.account?.id;
       }
       
-      console.log("[Webhook] Extracted data:");
+      console.log(`[Webhook-${requestId}] Extracted data:`);
       console.log("- Event:", webhookData.event);
       console.log("- Content:", content);
       console.log("- Message Type:", messageType); 
@@ -285,12 +289,27 @@ app.post("/webhook", async (req, res) => {
       const isIncomingMessage = messageType === 'incoming' || messageType === 0; // 0 = incoming trong một số versions
       
       if (isMessageEvent && content && conversationId && accountId && isIncomingMessage) {
-        // Rate limiting check
+        // Tạo message signature để detect duplicates
+        const messageSignature = `${conversationId}-${content.trim().substring(0, 50)}-${Date.now().toString().substring(0, -3)}`; // Tròn về giây
+        
+        console.log(`[Webhook-${requestId}] Message signature:`, messageSignature);
+        
+        // Check duplicate message trong 30 giây
+        if (processedMessages.has(messageSignature)) {
+          console.log(`[Webhook-${requestId}] DUPLICATE MESSAGE DETECTED - Already processed: ${messageSignature}`);
+          return res.json({ ok: true, received: true, skipped: "duplicate_message" });
+        }
+        
+        // Mark message as processed immediately
+        processedMessages.add(messageSignature);
+        
+        // Rate limiting check per conversation
         const now = Date.now();
         const lastProcessed = recentConversations.get(conversationId);
         
         if (lastProcessed && (now - lastProcessed) < RATE_LIMIT_WINDOW) {
-          console.log(`[Rate Limit] Skipping - conversation ${conversationId} processed ${now - lastProcessed}ms ago (< ${RATE_LIMIT_WINDOW}ms)`);
+          console.log(`[Webhook-${requestId}] RATE LIMITED - conversation ${conversationId} processed ${now - lastProcessed}ms ago (< ${RATE_LIMIT_WINDOW}ms)`);
+          processedMessages.delete(messageSignature); // Remove vì không xử lý
           return res.json({ ok: true, received: true, skipped: "rate_limited" });
         }
         
@@ -304,14 +323,15 @@ app.post("/webhook", async (req, res) => {
           messageType === 1; // 1 = outgoing in some versions
           
         if (isBotMessage) {
-          console.log("[Webhook] SKIPPING BOT MESSAGE - Detected bot/outgoing message");
+          console.log(`[Webhook-${requestId}] SKIPPING BOT MESSAGE - Detected bot/outgoing message`);
           console.log("- Content contains bot marker:", content.includes('🤖') || content.includes('[Bot]'));
           console.log("- Sender type:", sender?.type);
           console.log("- Message type:", messageType);
+          processedMessages.delete(messageSignature); // Remove vì không xử lý
           return res.json({ ok: true, received: true, skipped: "bot_message_detected" });
         }
         
-        console.log(`[Agent Bot] Processing HUMAN customer message: "${content}"`);
+        console.log(`[Webhook-${requestId}] Processing HUMAN customer message: "${content}"`);
         
         // Update rate limit tracking
         recentConversations.set(conversationId, now);
@@ -334,6 +354,12 @@ app.post("/webhook", async (req, res) => {
             }
           }
           
+          // Clean up old processed messages (older than 30 seconds)
+          if (processedMessages.size > 200) {
+            console.log(`[Cleanup] Processed messages set size: ${processedMessages.size}, clearing...`);
+            processedMessages.clear();
+          }
+          
           return res.json({ 
             ok: true, 
             received: true, 
@@ -343,7 +369,8 @@ app.post("/webhook", async (req, res) => {
             chatwoot_error: chatwootResult.error || null
           });
         } catch (error) {
-          console.error('[Processing Error]', error);
+          console.error(`[Webhook-${requestId}] Processing Error:`, error);
+          processedMessages.delete(messageSignature); // Remove vì failed
           return res.json({ 
             ok: true, 
             received: true, 
@@ -352,7 +379,7 @@ app.post("/webhook", async (req, res) => {
           });
         }
       } else {
-        console.log("[Webhook] Not processing:");
+        console.log(`[Webhook-${requestId}] Not processing:`);
         console.log("- Is message event:", isMessageEvent);
         console.log("- Is incoming:", isIncomingMessage);
         console.log("- Has content:", !!content);
@@ -360,14 +387,14 @@ app.post("/webhook", async (req, res) => {
         console.log("- Has account ID:", !!accountId);
       }
     } else {
-      console.log("[Webhook] Not a Chatwoot webhook - missing event");
+      console.log(`[Webhook-${requestId}] Not a Chatwoot webhook - missing event`);
     }
     
     // Webhook khác hoặc không phải message
-    console.log("[Webhook] Returning basic OK response");
+    console.log(`[Webhook-${requestId}] Returning basic OK response`);
     return res.json({ ok:true, received:true });
   } catch (e) {
-    console.error(e);
+    console.error(`[Webhook] Error:`, e);
     return res.status(500).json({ ok:false, error: String(e?.message||e) });
   }
 });
