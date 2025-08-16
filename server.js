@@ -234,32 +234,48 @@ app.post("/webhook", async (req, res) => {
     const webhookData = req.body;
     
     // Kiểm tra xem có phải Chatwoot webhook không
-    if (webhookData.event && webhookData.data) {
+    if (webhookData.event) {
       console.log("[Webhook] Event type:", webhookData.event);
-      console.log("[Webhook] Data structure:", Object.keys(webhookData.data));
+      console.log("[Webhook] Full payload structure:", Object.keys(webhookData));
       
-      // Flexible message detection - handle nhiều formats
-      const isMessageEvent = webhookData.event.includes('message') || webhookData.event === 'message_created';
-      const messageData = webhookData.data;
+      // Handle cả webhook thông thường và Agent Bot format
+      let messageData, content, messageType, conversationId, accountId;
       
-      // Lấy content từ nhiều possible fields
-      const content = messageData.content || messageData.message?.content || messageData.body;
-      const messageType = messageData.message_type || messageData.type || 'unknown';
-      const conversationId = messageData.conversation?.id || messageData.conversation_id;
-      const accountId = messageData.account?.id || messageData.account_id;
+      if (webhookData.data) {
+        // Webhook format cũ
+        messageData = webhookData.data;
+        content = messageData.content;
+        messageType = messageData.message_type;
+        conversationId = messageData.conversation?.id;
+        accountId = messageData.account?.id;
+      } else {
+        // Agent Bot format - message ở level root
+        messageData = webhookData;
+        content = webhookData.content;
+        messageType = webhookData.message_type;
+        conversationId = webhookData.conversation?.id;
+        accountId = webhookData.account?.id;
+      }
       
-      console.log("[Webhook] Extracted - Event:", webhookData.event, "Type:", messageType, "Content:", content);
-      console.log("[Webhook] IDs - Conversation:", conversationId, "Account:", accountId);
+      console.log("[Webhook] Extracted data:");
+      console.log("- Event:", webhookData.event);
+      console.log("- Content:", content);
+      console.log("- Message Type:", messageType); 
+      console.log("- Conversation ID:", conversationId);
+      console.log("- Account ID:", accountId);
       
-      // Xử lý nếu là incoming message và có đủ thông tin
-      if (isMessageEvent && content && conversationId && accountId) {
+      // Xử lý message_created events với incoming messages
+      const isMessageEvent = webhookData.event === 'message_created';
+      const isIncomingMessage = messageType === 'incoming' || messageType === 0; // 0 = incoming trong một số versions
+      
+      if (isMessageEvent && content && conversationId && accountId && isIncomingMessage) {
         // Skip bot messages (avoid loops)
-        if (content.includes('🤖') || content.includes('[Bot]') || messageType === 'outgoing') {
+        if (content.includes('🤖') || content.includes('[Bot]')) {
           console.log("[Webhook] Skipping bot message to avoid loop");
           return res.json({ ok: true, received: true, skipped: "bot_message" });
         }
         
-        console.log(`[Chatwoot] Processing user message: "${content}"`);
+        console.log(`[Agent Bot] Processing customer message: "${content}"`);
         
         try {
           console.log("[AI] Calling Gemini...");
@@ -287,10 +303,15 @@ app.post("/webhook", async (req, res) => {
           });
         }
       } else {
-        console.log("[Webhook] Not processing - missing data or not message event");
+        console.log("[Webhook] Not processing:");
+        console.log("- Is message event:", isMessageEvent);
+        console.log("- Is incoming:", isIncomingMessage);
+        console.log("- Has content:", !!content);
+        console.log("- Has conversation ID:", !!conversationId);
+        console.log("- Has account ID:", !!accountId);
       }
     } else {
-      console.log("[Webhook] Not a structured webhook - missing event or data");
+      console.log("[Webhook] Not a Chatwoot webhook - missing event");
     }
     
     // Webhook khác hoặc không phải message
