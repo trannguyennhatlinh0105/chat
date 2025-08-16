@@ -21,6 +21,10 @@ const CHATWOOT_API_KEY = process.env.CHATWOOT_API_KEY || ""; // API key cho Chat
 const CHATWOOT_BASE_URL = process.env.CHATWOOT_BASE_URL || ""; // Base URL của Chatwoot instance
 const PORT = process.env.PORT || 3000;
 
+// Rate limiting để tránh double replies
+const recentConversations = new Map(); // conversation_id -> last_processed_time
+const RATE_LIMIT_WINDOW = 5000; // 5 seconds
+
 // Chuẩn hoá __dirname trong ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -264,18 +268,53 @@ app.post("/webhook", async (req, res) => {
       console.log("- Conversation ID:", conversationId);
       console.log("- Account ID:", accountId);
       
+      // Check sender information to detect bot messages
+      let sender = null;
+      if (webhookData.data?.sender) {
+        sender = webhookData.data.sender;
+      } else if (webhookData.sender) {
+        sender = webhookData.sender;
+      }
+      
+      console.log("- Sender:", sender);
+      console.log("- Sender Type:", sender?.type);
+      console.log("- Sender Name:", sender?.name);
+      
       // Xử lý message_created events với incoming messages
       const isMessageEvent = webhookData.event === 'message_created';
       const isIncomingMessage = messageType === 'incoming' || messageType === 0; // 0 = incoming trong một số versions
       
       if (isMessageEvent && content && conversationId && accountId && isIncomingMessage) {
-        // Skip bot messages (avoid loops)
-        if (content.includes('🤖') || content.includes('[Bot]')) {
-          console.log("[Webhook] Skipping bot message to avoid loop");
-          return res.json({ ok: true, received: true, skipped: "bot_message" });
+        // Rate limiting check
+        const now = Date.now();
+        const lastProcessed = recentConversations.get(conversationId);
+        
+        if (lastProcessed && (now - lastProcessed) < RATE_LIMIT_WINDOW) {
+          console.log(`[Rate Limit] Skipping - conversation ${conversationId} processed ${now - lastProcessed}ms ago (< ${RATE_LIMIT_WINDOW}ms)`);
+          return res.json({ ok: true, received: true, skipped: "rate_limited" });
         }
         
-        console.log(`[Agent Bot] Processing customer message: "${content}"`);
+        // Enhanced bot message detection to avoid loops
+        const isBotMessage = 
+          content.includes('🤖') || 
+          content.includes('[Bot]') || 
+          sender?.type === 'agent_bot' ||
+          sender?.type === 'user' && sender?.name?.toLowerCase().includes('bot') ||
+          messageType === 'outgoing' ||
+          messageType === 1; // 1 = outgoing in some versions
+          
+        if (isBotMessage) {
+          console.log("[Webhook] SKIPPING BOT MESSAGE - Detected bot/outgoing message");
+          console.log("- Content contains bot marker:", content.includes('🤖') || content.includes('[Bot]'));
+          console.log("- Sender type:", sender?.type);
+          console.log("- Message type:", messageType);
+          return res.json({ ok: true, received: true, skipped: "bot_message_detected" });
+        }
+        
+        console.log(`[Agent Bot] Processing HUMAN customer message: "${content}"`);
+        
+        // Update rate limit tracking
+        recentConversations.set(conversationId, now);
         
         try {
           console.log("[AI] Calling Gemini...");
@@ -284,6 +323,16 @@ app.post("/webhook", async (req, res) => {
           
           console.log("[Chatwoot] Sending response back...");
           const chatwootResult = await sendChatwootMessage(conversationId, accountId, aiResponse);
+          
+          // Clean up old entries (optional)
+          if (recentConversations.size > 100) {
+            const cutoff = now - (RATE_LIMIT_WINDOW * 2);
+            for (const [convId, timestamp] of recentConversations.entries()) {
+              if (timestamp < cutoff) {
+                recentConversations.delete(convId);
+              }
+            }
+          }
           
           return res.json({ 
             ok: true, 
