@@ -107,13 +107,12 @@ ${KB.slice(0, 12000)}` }] });
   const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (!r.ok) throw new Error(`Gemini ${r.status}: ${await r.text()}`);
   const data = await r.json();
-  const parts = data?.candidates?.[0]?.content?.parts || [];
   const parts = data?.candidates?.[0]?.content?.parts ?? [];
-const text = parts
-  .map(p => (typeof p?.text === "string" ? p.text : ""))
-  .join("\n")
-  .trim();
-  " trong source => newline khi chạy
+  const text = parts
+    .map(p => (typeof p?.text === "string" ? p.text : ""))
+    .join("\n")
+    .trim();
+  // Convert \n trong source => newline khi chạy
   return text;
 }
 
