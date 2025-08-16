@@ -1,0 +1,13 @@
+{
+  "event": "message_created",
+  "data": {
+    "content": "Xin chào, tôi cần hỗ trợ",
+    "message_type": "incoming",
+    "conversation": {
+      "id": 123
+    },
+    "account": {
+      "id": 1
+    }
+  }
+}
